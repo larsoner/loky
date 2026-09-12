@@ -29,6 +29,7 @@ from concurrent.futures._base import (
 import loky
 from loky.process_executor import (
     LokyRecursionError,
+    BrokenProcessPool,
     ShutdownExecutorError,
     TerminatedWorkerError,
 )
@@ -1281,6 +1282,27 @@ class ExecutorTest:
             assert len(w) == 0, [w.message for w in w]
         finally:
             _end_spawned_pthread()
+
+    @pytest.mark.broken_pool
+    def test_manager_thread_crash_breaks_executor(self):
+        """An unexpected error in the manager thread breaks the executor
+        rather than leaving the submitted futures pending forever."""
+        self.executor.submit(int).result()  # starts the manager thread
+        manager = self.executor._executor_manager_thread
+
+        def crash():
+            raise RuntimeError("manager thread bug")
+
+        # Reached on the loop iteration after the next submission wakes it up
+        manager.wait_result_broken_or_wakeup = crash
+        future = self.executor.submit(int)
+        with pytest.raises(BrokenProcessPool, match="manager thread crashed"):
+            future.result(timeout=_executor_mixin.TIMEOUT)
+        assert "manager thread bug" in str(future.exception().__cause__)
+        manager.join(_executor_mixin.TIMEOUT)
+        assert not manager.is_alive()
+        with pytest.raises(BrokenProcessPool):
+            self.executor.submit(int)
 
 
 def _custom_initializer():
